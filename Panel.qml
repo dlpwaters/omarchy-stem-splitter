@@ -25,13 +25,13 @@ Panel {
   property string inputPath: ""
   property string mode: "remove"
   property string outputFormat: "flac"
+  property string processingProfile: "best"
   property bool removeVocals: true
   property bool removeDrums: false
   property bool removeBass: false
   property bool removeOther: false
   property bool engineReady: false
-  property bool busy: actionProc.running
-  property bool cancelRequested: false
+  readonly property bool busy: status === "working" || actionProc.running || cancelProc.running
   property string actionKind: ""
   property string status: "checking"
   property string statusMessage: "Checking the local engine…"
@@ -47,9 +47,15 @@ Panel {
   readonly property bool selectionValid: mode === "full"
     || (selectedCount > 0 && selectedCount < 4)
 
+  Component.onCompleted: {
+    checkEngine()
+    refreshJobStatus()
+  }
+
   function open() {
     root.controller.show()
     if (!actionProc.running) checkEngine()
+    refreshJobStatus()
   }
 
   function close() { root.controller.hide() }
@@ -79,14 +85,22 @@ Panel {
     checkProc.running = true
   }
 
+  function refreshJobStatus() {
+    if (!statusProc.running && !actionProc.running) statusProc.running = true
+  }
+
   function chooseFile() {
-    if (!selectProc.running && !actionProc.running) selectProc.running = true
+    if (selectProc.running || root.busy) return
+    statusMessage = "Choose a track in the file picker…"
+    // Release the layer-shell keyboard grab before Zenity opens. Keeping this
+    // popout visible can place the native picker behind it on Hyprland.
+    close()
+    Qt.callLater(function() { selectProc.running = true })
   }
 
   function startSetup() {
     if (actionProc.running) return
     actionKind = "setup"
-    cancelRequested = false
     actionError = ""
     outputPath = ""
     progress = 4
@@ -98,25 +112,22 @@ Panel {
 
   function startProcessing() {
     if (actionProc.running || !engineReady || inputPath === "" || !selectionValid) return
-    actionKind = "run"
-    cancelRequested = false
+    actionKind = "start"
     actionError = ""
     outputPath = ""
     progress = 2
     status = "working"
     statusMessage = "Preparing the track…"
-    actionProc.command = [helperPath, "run", "--mode", mode,
-      "--targets", selectedTargets(), "--format", outputFormat, "--", inputPath]
+    actionProc.command = [helperPath, "start", "--mode", mode,
+      "--targets", selectedTargets(), "--format", outputFormat,
+      "--profile", processingProfile, "--", inputPath]
     actionProc.running = true
   }
 
   function cancelProcessing() {
-    if (!actionProc.running) return
-    cancelRequested = true
-    actionProc.running = false
-    status = "idle"
-    statusMessage = "Cancelled. No output was published."
-    progress = 0
+    if (status !== "working" || cancelProc.running) return
+    statusMessage = "Stopping the background worker…"
+    cancelProc.running = true
   }
 
   function processFile(path, requestedMode, targets) {
@@ -124,12 +135,18 @@ Panel {
   }
 
   function processFileAs(path, requestedMode, targets, requestedFormat) {
+    processConfigured(path, requestedMode, targets, requestedFormat, "best")
+  }
+
+  function processConfigured(path, requestedMode, targets, requestedFormat, requestedProfile) {
     inputPath = String(path || "")
     if (requestedMode === "full") mode = "full"
     else mode = "remove"
     var normalizedFormat = String(requestedFormat || "flac").toLowerCase()
     outputFormat = normalizedFormat === "wav" || normalizedFormat === "mp4"
       ? normalizedFormat : "flac"
+    processingProfile = String(requestedProfile || "best").toLowerCase() === "fast"
+      ? "fast" : "best"
     var requested = String(targets || "vocals").split(",")
     removeVocals = requested.indexOf("vocals") >= 0
     removeDrums = requested.indexOf("drums") >= 0
@@ -142,18 +159,22 @@ Panel {
   function applyCheck(line) {
     var parts = String(line || "").trim().split("\t")
     engineReady = parts[0] === "READY"
-    status = engineReady ? "idle" : "missing"
-    statusMessage = parts.length > 1 ? parts.slice(1).join(" ")
-      : (engineReady ? "Ready" : "Audio engine setup is required.")
+    if (status !== "working") {
+      status = engineReady ? "idle" : "missing"
+      statusMessage = parts.length > 1 ? parts.slice(1).join(" ")
+        : (engineReady ? "Ready" : "Audio engine setup is required.")
+    }
   }
 
   function applySelection(exitCode, text) {
-    if (exitCode === 0) {
-      inputPath = String(text || "").trim()
+    var selectedPath = String(text || "").trim()
+    if (exitCode === 0 && selectedPath !== "") {
+      inputPath = selectedPath
       outputPath = ""
       status = engineReady ? "idle" : "missing"
       statusMessage = engineReady ? "Ready to process." : "Set up the audio engine first."
     }
+    Qt.callLater(root.open)
   }
 
   function handleActionLine(line) {
@@ -171,21 +192,59 @@ Panel {
     }
   }
 
-  function finishAction(exitCode) {
-    if (cancelRequested) {
-      cancelRequested = false
+  function applyJobStatus(text) {
+    var info
+    try {
+      info = JSON.parse(String(text || "").trim())
+    } catch (error) {
       return
     }
+    var jobStatus = String(info.status || "idle")
+    if (jobStatus === "starting" || jobStatus === "working") {
+      status = "working"
+      engineReady = true
+      progress = Math.max(0, Math.min(100, Number(info.percent) || 0))
+      statusMessage = String(info.message || "Processing in the background…")
+      outputPath = ""
+      if (info.sourcePath) inputPath = String(info.sourcePath)
+      if (info.mode === "full" || info.mode === "remove") mode = String(info.mode)
+      if (info.format === "flac" || info.format === "wav" || info.format === "mp4")
+        outputFormat = String(info.format)
+      processingProfile = info.profile === "fast" ? "fast" : "best"
+      var targets = Array.isArray(info.targets) ? info.targets : []
+      removeVocals = targets.indexOf("vocals") >= 0
+      removeDrums = targets.indexOf("drums") >= 0
+      removeBass = targets.indexOf("bass") >= 0
+      removeOther = targets.indexOf("other") >= 0
+    } else if (jobStatus === "finished") {
+      status = "ready"
+      progress = 100
+      statusMessage = String(info.message || "Finished. Your files are on the Desktop.")
+      outputPath = String(info.outputPath || "")
+      if (info.sourcePath) inputPath = String(info.sourcePath)
+    } else if (jobStatus === "error") {
+      status = "error"
+      progress = 0
+      statusMessage = String(info.message || "The background job failed.")
+    } else if (jobStatus === "cancelled") {
+      status = "idle"
+      progress = 0
+      statusMessage = String(info.message || "Cancelled. No partial output was published.")
+    }
+  }
+
+  function finishAction(exitCode) {
     if (exitCode === 0) {
       if (actionKind === "setup") {
         engineReady = true
         status = "ready"
         statusMessage = "Engine ready. Choose a track to begin."
+        progress = 100
       } else {
-        status = "ready"
-        statusMessage = "Finished. Your files are on the Desktop."
+        status = "working"
+        statusMessage = "Background job started. You can close this panel."
+        refreshJobStatus()
       }
-      progress = 100
       return
     }
     status = "error"
@@ -232,6 +291,31 @@ Panel {
       onStreamFinished: root.actionError = text
     }
     onExited: function(exitCode) { root.finishAction(exitCode) }
+  }
+
+  Process {
+    id: statusProc
+    command: [root.helperPath, "status"]
+    stdout: StdioCollector {
+      id: statusOutput
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      if (exitCode === 0) root.applyJobStatus(statusOutput.text)
+    }
+  }
+
+  Process {
+    id: cancelProc
+    command: [root.helperPath, "cancel"]
+    onExited: function(exitCode) { root.refreshJobStatus() }
+  }
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: root.status === "working"
+    onTriggered: root.refreshJobStatus()
   }
 
   Process { id: openProc }
@@ -401,6 +485,46 @@ Panel {
           }
         }
 
+        Column {
+          width: parent.width
+          spacing: Style.space(5)
+
+          Text {
+            text: "PROCESSING"
+            color: root.muted
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            font.letterSpacing: 0.8
+          }
+
+          ButtonGroup {
+            width: parent.width
+            options: ["Best quality", "Fast"]
+            value: root.processingProfile === "fast" ? "Fast" : "Best quality"
+            foreground: root.foreground
+            background: root.background
+            accent: Color.accent
+            fontFamily: root.fontFamily
+            enabled: !root.busy
+            onChanged: function(next) {
+              root.processingProfile = next === "Fast" ? "fast" : "best"
+              root.outputPath = ""
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: root.processingProfile === "fast"
+              ? "Faster models · lower CPU time · may leave more vocal or instrument bleed"
+              : "Highest-quality models · slower CPU processing"
+            color: root.muted
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+        }
+
         Text {
           width: parent.width
           text: root.mode === "full"
@@ -526,7 +650,7 @@ Panel {
           }
 
           Button {
-            visible: root.busy
+            visible: root.status === "working" && !actionProc.running
             text: "Cancel"
             foreground: Color.urgent
             onClicked: root.cancelProcessing()
@@ -545,7 +669,9 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Output: ~/Desktop/stems/<track>/ · First use downloads the selected model."
+          text: root.busy
+            ? "Runs in the background · Safe to close this panel · Output appears when complete."
+            : "Output: ~/Desktop/stems/<track>/ · First use downloads the selected model."
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

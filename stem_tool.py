@@ -13,21 +13,27 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.0.1"
 ENGINE_VERSION = "0.44.5"
 PYTHON_VERSION = "3.12"
 PYTORCH_VERSION = "2.13.0+cpu"
+TORCHVISION_VERSION = "0.28.0+cpu"
 AUDIOREAD_VERSION = "3.1.0"
 LIBROSA_VERSION = "0.10.2.post1"
 PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 VOCAL_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 FOUR_STEM_MODEL = "htdemucs_ft.yaml"
+FAST_VOCAL_MODEL = "UVR-MDX-NET-Inst_HQ_3.onnx"
+FAST_FOUR_STEM_MODEL = "htdemucs.yaml"
 STEMS = ("vocals", "drums", "bass", "other")
 OUTPUT_FORMATS = ("flac", "wav", "mp4")
+PROCESSING_PROFILES = ("best", "fast")
 SUPPORTED_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".oga", ".aac", ".wma", ".aiff", ".aif"}
 
 HOME = Path.home()
@@ -40,14 +46,69 @@ MODEL_DIR = DATA_HOME / "models"
 OUTPUT_ROOT = HOME / "Desktop/stems"
 LOCK_PATH = STATE_HOME / "operation.lock"
 ERROR_LOG = STATE_HOME / "last-error.log"
+JOB_STATE_PATH = STATE_HOME / "job.json"
+JOB_UNIT = "omarchy-stem-splitter-job.service"
+
+ACTIVE_JOB_ID: str | None = None
+STATE_LOCK = threading.Lock()
 
 
 class StemSplitterError(RuntimeError):
     pass
 
 
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_job_state() -> dict[str, object] | None:
+    try:
+        value = json.loads(JOB_STATE_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def write_job_state(state: dict[str, object]) -> None:
+    STATE_HOME.mkdir(parents=True, exist_ok=True)
+    state["updatedAt"] = utc_now()
+    with STATE_LOCK:
+        descriptor, temporary_name = tempfile.mkstemp(prefix="job-", suffix=".tmp", dir=STATE_HOME)
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps(state, indent=2) + "\n")
+            os.replace(temporary, JOB_STATE_PATH)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def update_job_state(**changes: object) -> None:
+    if ACTIVE_JOB_ID is None:
+        return
+    state = load_job_state() or {}
+    if state.get("jobId") != ACTIVE_JOB_ID:
+        return
+    state.update(changes)
+    write_job_state(state)
+
+
 def emit(kind: str, *values: object) -> None:
     fields = [kind, *(str(value).replace("\t", " ").replace("\n", " ") for value in values)]
+    if kind == "EVENT" and len(values) >= 2:
+        try:
+            percent = max(0, min(100, int(values[0])))
+        except (TypeError, ValueError):
+            percent = 0
+        update_job_state(status="working", percent=percent, message=str(values[1]))
+    elif kind == "DONE" and values:
+        update_job_state(
+            status="finished",
+            percent=100,
+            message="Finished. Your files are on the Desktop.",
+            outputPath=str(values[0]),
+            finishedAt=utc_now(),
+        )
     print("\t".join(fields), flush=True)
 
 
@@ -118,7 +179,7 @@ def engine_ready() -> tuple[bool, str]:
             "-c",
             "import importlib.metadata as m; from audio_separator.separator import Separator; "
             "print('|'.join(m.version(name) for name in "
-            "('audio-separator', 'torch', 'audioread', 'librosa')))",
+            "('audio-separator', 'torch', 'torchvision', 'audioread', 'librosa')))",
         ],
         capture_output=True,
         text=True,
@@ -126,7 +187,9 @@ def engine_ready() -> tuple[bool, str]:
         check=False,
     )
     version_set = check.stdout.strip()
-    expected = "|".join((ENGINE_VERSION, PYTORCH_VERSION, AUDIOREAD_VERSION, LIBROSA_VERSION))
+    expected = "|".join(
+        (ENGINE_VERSION, PYTORCH_VERSION, TORCHVISION_VERSION, AUDIOREAD_VERSION, LIBROSA_VERSION)
+    )
     if check.returncode != 0 or version_set != expected:
         return False, f"Audio engine {ENGINE_VERSION} setup is required."
     return True, f"Audio Separator {ENGINE_VERSION} is ready."
@@ -162,7 +225,9 @@ def setup_engine() -> int:
         emit("EVENT", 24, "Installing the CPU audio runtime…")
         run_checked([
             uv, "pip", "install", "--python", str(ENGINE_PYTHON),
-            "--default-index", PYTORCH_CPU_INDEX, f"torch=={PYTORCH_VERSION}",
+            "--default-index", PYTORCH_CPU_INDEX,
+            f"torch=={PYTORCH_VERSION}",
+            f"torchvision=={TORCHVISION_VERSION}",
         ])
         emit("EVENT", 42, f"Installing Audio Separator {ENGINE_VERSION}…")
         run_checked([
@@ -179,11 +244,25 @@ def setup_engine() -> int:
         return 0
 
 
-def call_engine(source: Path, model: str, output_dir: Path, single_stem: str | None) -> list[Path]:
+def mapped_engine_progress(raw_percent: int, phase: str) -> int:
+    raw_percent = max(0, min(100, raw_percent))
+    if phase == "separating":
+        return min(79, 42 + round(raw_percent * 0.37))
+    return min(41, 28 + round(raw_percent * 0.13))
+
+
+def call_engine(
+    source: Path,
+    model: str,
+    output_dir: Path,
+    single_stem: str | None,
+    profile: str,
+) -> list[Path]:
     runner = Path(__file__).with_name("engine_runner.py")
     command = [
         str(ENGINE_PYTHON), str(runner), "--input", str(source), "--model", model,
         "--output-dir", str(output_dir), "--model-dir", str(MODEL_DIR),
+        "--profile", profile,
     ]
     if single_stem:
         command.extend(["--single-stem", single_stem])
@@ -193,10 +272,46 @@ def call_engine(source: Path, model: str, output_dir: Path, single_stem: str | N
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
-            stderr=error_log,
+            stderr=subprocess.PIPE,
             text=True,
             start_new_session=True,
         )
+
+        phase = {"name": "loading"}
+        progress_lock = threading.Lock()
+        last_progress = {"value": 0}
+
+        def report_engine_progress(raw_percent: int) -> None:
+            overall = mapped_engine_progress(raw_percent, phase["name"])
+            with progress_lock:
+                if overall <= last_progress["value"]:
+                    return
+                last_progress["value"] = overall
+            message = "Separating the track locally…" if phase["name"] == "separating" else "Loading the model…"
+            emit("EVENT", overall, message)
+
+        def drain_stderr() -> None:
+            assert process.stderr is not None
+            line: list[str] = []
+            while True:
+                character = process.stderr.read(1)
+                if character == "":
+                    break
+                error_log.write(character)
+                if character in "\r\n":
+                    error_log.flush()
+                    match = re.search(r"(\d{1,3})%\|", "".join(line))
+                    if match:
+                        report_engine_progress(int(match.group(1)))
+                    line.clear()
+                else:
+                    line.append(character)
+            if line:
+                error_log.write("\n")
+                error_log.flush()
+
+        stderr_thread = threading.Thread(target=drain_stderr, name="separator-log", daemon=True)
+        stderr_thread.start()
 
         def terminate_child(_signum, _frame):
             if process.poll() is None:
@@ -212,9 +327,16 @@ def call_engine(source: Path, model: str, output_dir: Path, single_stem: str | N
                 if line.startswith("RESULT\t"):
                     payload = json.loads(line.split("\t", 1)[1])
                     result_files = [Path(item) if Path(item).is_absolute() else output_dir / item for item in payload]
+                elif line.startswith("EVENT\t"):
+                    parts = line.split("\t", 2)
+                    percent = int(parts[1])
+                    if percent >= 42:
+                        phase["name"] = "separating"
+                    emit("EVENT", percent, parts[2] if len(parts) > 2 else "Working…")
                 else:
                     print(line, flush=True)
             return_code = process.wait()
+            stderr_thread.join(timeout=5)
         finally:
             signal.signal(signal.SIGTERM, previous_term)
 
@@ -270,6 +392,7 @@ def write_metadata(
     targets: tuple[str, ...],
     model: str,
     output_format: str,
+    profile: str,
 ) -> None:
     metadata = {
         "plugin": "Omarchy Stem Splitter",
@@ -280,13 +403,20 @@ def write_metadata(
         "mode": mode,
         "removed": list(targets),
         "outputFormat": output_format,
+        "processingProfile": profile,
         "sourceFile": source.name,
         "createdAt": datetime.now(timezone.utc).isoformat(),
     }
     (destination / "separation.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
-def process_track(source_text: str, mode: str, targets_text: str, output_format: str) -> int:
+def process_track(
+    source_text: str,
+    mode: str,
+    targets_text: str,
+    output_format: str,
+    profile: str,
+) -> int:
     ready, message = engine_ready()
     if not ready:
         raise StemSplitterError(message)
@@ -295,6 +425,8 @@ def process_track(source_text: str, mode: str, targets_text: str, output_format:
     targets = parse_targets(targets_text) if mode == "remove" else ()
     if output_format not in OUTPUT_FORMATS:
         raise StemSplitterError(f"Unsupported output format: {output_format}")
+    if profile not in PROCESSING_PROFILES:
+        raise StemSplitterError(f"Unsupported processing profile: {profile}")
 
     with operation_lock():
         CACHE_HOME.mkdir(parents=True, exist_ok=True)
@@ -303,12 +435,13 @@ def process_track(source_text: str, mode: str, targets_text: str, output_format:
         published = unique_output_dir(OUTPUT_ROOT, safe_track_name(source))
         staging = temporary / "published"
         staging.mkdir()
-        model = FOUR_STEM_MODEL
+        model = FAST_FOUR_STEM_MODEL if profile == "fast" else FOUR_STEM_MODEL
         try:
             if mode == "remove" and targets == ("vocals",):
-                model = VOCAL_MODEL
-                emit("EVENT", 10, "Preparing the high-quality vocal-removal model…")
-                outputs = call_engine(source, model, temporary / "engine", "Instrumental")
+                model = FAST_VOCAL_MODEL if profile == "fast" else VOCAL_MODEL
+                quality = "fast" if profile == "fast" else "high-quality"
+                emit("EVENT", 10, f"Preparing the {quality} vocal-removal model…")
+                outputs = call_engine(source, model, temporary / "engine", "Instrumental", profile)
                 classified = classify_outputs(outputs)
                 instrumental = classified.get("instrumental")
                 if instrumental is None:
@@ -320,8 +453,9 @@ def process_track(source_text: str, mode: str, targets_text: str, output_format:
                     output_format,
                 )
             else:
-                emit("EVENT", 10, "Preparing the fine-tuned four-stem model…")
-                outputs = call_engine(source, model, temporary / "engine", None)
+                quality = "fast" if profile == "fast" else "fine-tuned"
+                emit("EVENT", 10, f"Preparing the {quality} four-stem model…")
+                outputs = call_engine(source, model, temporary / "engine", None, profile)
                 classified = classify_outputs(outputs)
                 missing = [stem for stem in STEMS if stem not in classified]
                 if missing:
@@ -344,7 +478,7 @@ def process_track(source_text: str, mode: str, targets_text: str, output_format:
                         staging / f"mix-without-{'-'.join(targets)}.{output_format}",
                         output_format,
                     )
-            write_metadata(staging, source, mode, targets, model, output_format)
+            write_metadata(staging, source, mode, targets, model, output_format, profile)
             emit("EVENT", 96, "Verifying the finished files…")
             audio_outputs = list(staging.glob(f"*.{output_format}"))
             if not audio_outputs:
@@ -357,6 +491,165 @@ def process_track(source_text: str, mode: str, targets_text: str, output_format:
             return 0
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
+
+
+def unit_is_active() -> bool | None:
+    systemctl = shutil.which("systemctl")
+    if not systemctl:
+        return None
+    result = subprocess.run(
+        [systemctl, "--user", "is-active", JOB_UNIT],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    status = result.stdout.strip()
+    if result.returncode == 0 and status == "active":
+        return True
+    if status in {"inactive", "failed", "deactivating"}:
+        return False
+    return None
+
+
+def start_job(
+    source_text: str,
+    mode: str,
+    targets_text: str,
+    output_format: str,
+    profile: str,
+) -> int:
+    ready, message = engine_ready()
+    if not ready:
+        raise StemSplitterError(message)
+    require_command("ffmpeg")
+    systemd_run = require_command("systemd-run")
+    source = validate_input(source_text)
+    targets = parse_targets(targets_text) if mode == "remove" else ()
+    if output_format not in OUTPUT_FORMATS:
+        raise StemSplitterError(f"Unsupported output format: {output_format}")
+    if profile not in PROCESSING_PROFILES:
+        raise StemSplitterError(f"Unsupported processing profile: {profile}")
+    if unit_is_active() is True:
+        raise StemSplitterError("Another background separation job is already running.")
+
+    lock = operation_lock()
+    lock.close()
+    job_id = uuid.uuid4().hex
+    write_job_state({
+        "schemaVersion": 1,
+        "jobId": job_id,
+        "status": "starting",
+        "percent": 2,
+        "message": "Starting the background worker…",
+        "sourcePath": str(source),
+        "sourceName": source.name,
+        "mode": mode,
+        "targets": list(targets),
+        "format": output_format,
+        "profile": profile,
+        "outputPath": "",
+        "startedAt": utc_now(),
+    })
+
+    helper = Path(__file__).with_name("stem-tool")
+    command = [
+        systemd_run,
+        "--user",
+        "--quiet",
+        "--collect",
+        f"--unit={JOB_UNIT}",
+        "--description=Omarchy Stem Splitter background job",
+        "--service-type=exec",
+        "--property=KillMode=control-group",
+        "--property=SuccessExitStatus=130",
+        "--property=TimeoutStopSec=20s",
+        "--",
+        str(helper),
+        "worker",
+        "--job-id",
+        job_id,
+        "--mode",
+        mode,
+        "--targets",
+        ",".join(targets) if targets else "vocals",
+        "--format",
+        output_format,
+        "--profile",
+        profile,
+        "--",
+        str(source),
+    ]
+    try:
+        run_checked(command)
+    except StemSplitterError as exc:
+        state = load_job_state() or {}
+        state.update(status="error", percent=0, message=str(exc), finishedAt=utc_now())
+        write_job_state(state)
+        raise
+    emit("STARTED", job_id)
+    return 0
+
+
+def worker_job(
+    job_id: str,
+    source_text: str,
+    mode: str,
+    targets_text: str,
+    output_format: str,
+    profile: str,
+) -> int:
+    global ACTIVE_JOB_ID
+    state = load_job_state()
+    if state is None or state.get("jobId") != job_id:
+        raise StemSplitterError("Background job state does not match this worker.")
+    ACTIVE_JOB_ID = job_id
+    update_job_state(status="working", percent=4, message="Background worker started.")
+    return process_track(source_text, mode, targets_text, output_format, profile)
+
+
+def job_status() -> int:
+    state = load_job_state()
+    if state is None:
+        state = {
+            "schemaVersion": 1,
+            "status": "idle",
+            "percent": 0,
+            "message": "Choose a track to begin.",
+            "outputPath": "",
+        }
+    elif state.get("status") in {"starting", "working"} and unit_is_active() is False:
+        state.update(
+            status="error",
+            percent=0,
+            message="The background worker stopped unexpectedly. See the last-error log.",
+            finishedAt=utc_now(),
+        )
+        write_job_state(state)
+    print(json.dumps(state, separators=(",", ":")), flush=True)
+    return 0
+
+
+def cancel_job() -> int:
+    state = load_job_state()
+    if state is None or state.get("status") not in {"starting", "working"}:
+        emit("IDLE", "No background separation job is running.")
+        return 0
+    systemctl = require_command("systemctl")
+    subprocess.run(
+        [systemctl, "--user", "stop", JOB_UNIT],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    state.update(
+        status="cancelled",
+        percent=0,
+        message="Cancelled. No partial output was published.",
+        finishedAt=utc_now(),
+    )
+    write_job_state(state)
+    emit("CANCELLED", state["message"])
+    return 0
 
 
 def select_file() -> int:
@@ -387,11 +680,22 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("check")
     subparsers.add_parser("setup")
     subparsers.add_parser("select")
-    run_parser = subparsers.add_parser("run")
-    run_parser.add_argument("--mode", choices=("remove", "full"), required=True)
-    run_parser.add_argument("--targets", default="vocals")
-    run_parser.add_argument("--format", choices=OUTPUT_FORMATS, default="flac")
-    run_parser.add_argument("source")
+    for command_name in ("run", "start"):
+        job_parser = subparsers.add_parser(command_name)
+        job_parser.add_argument("--mode", choices=("remove", "full"), required=True)
+        job_parser.add_argument("--targets", default="vocals")
+        job_parser.add_argument("--format", choices=OUTPUT_FORMATS, default="flac")
+        job_parser.add_argument("--profile", choices=PROCESSING_PROFILES, default="best")
+        job_parser.add_argument("source")
+    worker_parser = subparsers.add_parser("worker")
+    worker_parser.add_argument("--job-id", required=True)
+    worker_parser.add_argument("--mode", choices=("remove", "full"), required=True)
+    worker_parser.add_argument("--targets", default="vocals")
+    worker_parser.add_argument("--format", choices=OUTPUT_FORMATS, default="flac")
+    worker_parser.add_argument("--profile", choices=PROCESSING_PROFILES, default="best")
+    worker_parser.add_argument("source")
+    subparsers.add_parser("status")
+    subparsers.add_parser("cancel")
     open_parser = subparsers.add_parser("open")
     open_parser.add_argument("path")
     return parser
@@ -409,13 +713,33 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "select":
             return select_file()
         if args.command == "run":
-            return process_track(args.source, args.mode, args.targets, args.format)
+            return process_track(args.source, args.mode, args.targets, args.format, args.profile)
+        if args.command == "start":
+            return start_job(args.source, args.mode, args.targets, args.format, args.profile)
+        if args.command == "worker":
+            return worker_job(args.job_id, args.source, args.mode, args.targets, args.format, args.profile)
+        if args.command == "status":
+            return job_status()
+        if args.command == "cancel":
+            return cancel_job()
         if args.command == "open":
             return open_folder(args.path)
     except KeyboardInterrupt:
+        update_job_state(
+            status="cancelled",
+            percent=0,
+            message="Cancelled. No partial output was published.",
+            finishedAt=utc_now(),
+        )
         print("Cancelled.", file=sys.stderr)
         return 130
     except (StemSplitterError, OSError, subprocess.SubprocessError) as exc:
+        update_job_state(
+            status="error",
+            percent=0,
+            message=str(exc),
+            finishedAt=utc_now(),
+        )
         print(str(exc), file=sys.stderr)
         return 1
     return 64

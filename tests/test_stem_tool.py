@@ -1,7 +1,9 @@
+import io
 import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import stem_tool
 
@@ -59,10 +61,52 @@ class StemToolTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             destination = Path(temp)
             stem_tool.write_metadata(
-                destination, Path("Song.wav"), "full", (), "model.yaml", "wav"
+                destination, Path("Song.wav"), "full", (), "model.yaml", "wav", "fast"
             )
             metadata = json.loads((destination / "separation.json").read_text())
             self.assertEqual(metadata["outputFormat"], "wav")
+            self.assertEqual(metadata["processingProfile"], "fast")
+
+    def test_engine_progress_mapping(self):
+        self.assertEqual(stem_tool.mapped_engine_progress(0, "loading"), 28)
+        self.assertEqual(stem_tool.mapped_engine_progress(100, "loading"), 41)
+        self.assertEqual(stem_tool.mapped_engine_progress(50, "separating"), 60)
+        self.assertEqual(stem_tool.mapped_engine_progress(100, "separating"), 79)
+
+    def test_job_state_round_trip(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_home = Path(temp)
+            state_path = state_home / "job.json"
+            with (
+                mock.patch.object(stem_tool, "STATE_HOME", state_home),
+                mock.patch.object(stem_tool, "JOB_STATE_PATH", state_path),
+            ):
+                stem_tool.write_job_state({"jobId": "test", "status": "working", "percent": 42})
+                state = stem_tool.load_job_state()
+                self.assertIsNotNone(state)
+                self.assertEqual(state["jobId"], "test")
+                self.assertEqual(state["status"], "working")
+                self.assertIn("updatedAt", state)
+
+    def test_start_parser_defaults_to_best_profile(self):
+        args = stem_tool.build_parser().parse_args([
+            "start", "--mode", "remove", "/tmp/song.flac"
+        ])
+        self.assertEqual(args.profile, "best")
+
+    def test_status_does_not_fail_job_when_service_state_is_unknown(self):
+        with tempfile.TemporaryDirectory() as temp:
+            state_home = Path(temp)
+            state_path = state_home / "job.json"
+            with (
+                mock.patch.object(stem_tool, "STATE_HOME", state_home),
+                mock.patch.object(stem_tool, "JOB_STATE_PATH", state_path),
+                mock.patch.object(stem_tool, "unit_is_active", return_value=None),
+                mock.patch("sys.stdout", new=io.StringIO()),
+            ):
+                stem_tool.write_job_state({"jobId": "test", "status": "working", "percent": 42})
+                stem_tool.job_status()
+                self.assertEqual(stem_tool.load_job_state()["status"], "working")
 
 
 if __name__ == "__main__":

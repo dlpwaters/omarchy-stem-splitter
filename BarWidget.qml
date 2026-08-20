@@ -20,6 +20,7 @@ BarWidget {
   function open() { if (panelLoader.item) panelLoader.item.open() }
   function close() { if (panelLoader.item) panelLoader.item.close() }
   function toggle() { if (panelLoader.item) panelLoader.item.toggle() }
+  function chooseFile() { if (panelLoader.item) panelLoader.item.chooseFile() }
   function closeForPopoutSwitch() {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
@@ -28,6 +29,9 @@ BarWidget {
   }
   function processFileAs(path, mode, targets, format) {
     if (panelLoader.item) panelLoader.item.processFileAs(path, mode, targets, format)
+  }
+  function processConfigured(path, mode, targets, format, profile) {
+    if (panelLoader.item) panelLoader.item.processConfigured(path, mode, targets, format, profile)
   }
 
   function injectPanel() {
@@ -60,11 +64,15 @@ BarWidget {
     function show() { root.open() }
     function hide() { root.close() }
     function toggle() { root.toggle() }
+    function choose() { root.chooseFile() }
     function process(path: string, mode: string, targets: string) {
       root.processFile(path, mode, targets)
     }
     function processAs(path: string, mode: string, targets: string, format: string) {
       root.processFileAs(path, mode, targets, format)
+    }
+    function processConfigured(path: string, mode: string, targets: string, format: string, profile: string) {
+      root.processConfigured(path, mode, targets, format, profile)
     }
   }
 

@@ -20,6 +20,7 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--model-dir", required=True)
     parser.add_argument("--single-stem")
+    parser.add_argument("--profile", choices=("best", "fast"), default="best")
     args = parser.parse_args()
 
     from audio_separator.separator import Separator
@@ -35,7 +36,12 @@ def main() -> int:
         output_single_stem=args.single_stem,
         sample_rate=44100,
         use_soundfile=False,
-        demucs_params={"segment_size": "Default", "shifts": 2, "overlap": 0.25, "segments_enabled": True},
+        demucs_params={
+            "segment_size": "Default",
+            "shifts": 1 if args.profile == "fast" else 2,
+            "overlap": 0.25,
+            "segments_enabled": True,
+        },
         mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1, "overlap": 8, "pitch_shift": 0},
     )
     emit(28, "Loading the model; first use downloads it once…")
