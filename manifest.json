@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dlpwaters.stem-splitter",
+  "name": "Stem Splitter",
+  "version": "1.0.0",
+  "author": "Dean Waters",
+  "license": "MIT",
+  "description": "Remove selected parts or export local stems as FLAC, WAV, or MP4",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Stem Splitter",
+    "description": "Remove selected parts or export local stems as FLAC, WAV, or MP4",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}
