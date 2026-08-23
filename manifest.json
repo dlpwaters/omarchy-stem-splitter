@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.dlpwaters.stem-splitter",
   "name": "Stem Splitter",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "author": "Dean Waters",
   "license": "MIT",
   "description": "Remove selected parts or export local stems as FLAC, WAV, or MP4",

@@ -19,5 +19,8 @@ jobs:
       - name: Validate manifest and Python helpers
         run: |
           python -m json.tool manifest.json >/dev/null
+          python -m json.tool models.lock.json >/dev/null
+          grep -q -- '--hash=sha256:' requirements.lock
+          grep -q -- '--hash=sha256:' build-requirements.lock
           python -m py_compile stem_tool.py engine_runner.py
           PYTHONPATH=. python -m unittest discover -s tests -v
