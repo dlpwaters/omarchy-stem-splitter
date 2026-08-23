@@ -26,11 +26,11 @@ Stem Splitter uses [Audio Separator](https://github.com/nomadkaraoke/python-audi
 
 Install these standard Arch packages before setup:
 
-- `uv` — creates the isolated Python 3.12 environment
+- `uv` — creates the isolated, reviewed Python 3.12.13 environment
 - `ffmpeg` — reads, validates, and combines audio
 - `zenity` — native audio-file picker
 
-The plugin never invokes a system package manager or asks for elevated permission. Its explicit **Set up engine** action installs `torch==2.13.0+cpu` and `torchvision==0.28.0+cpu` from PyTorch's official CPU wheel index, plus `audio-separator[cpu]==0.44.5`, `audioread==3.1.0`, and `librosa==0.10.2.post1`, into `~/.local/share/omarchy-stem-splitter/venv` using `uv`.
+The plugin never invokes a system package manager or asks for elevated permission. Its explicit **Set up engine** action creates an exact CPython 3.12.13 x86_64 environment and uses `uv pip sync --require-hashes` with the committed [`requirements.lock`](requirements.lock). That lock fixes every direct and transitive package version and accepted distribution SHA-256, including Audio Separator 0.44.5 and the matching CPU PyTorch stack. Wheels are mandatory except for `diffq`, whose upstream release has no Linux wheel; its hash-verified source distribution is built with the separately pinned and hashed [`build-requirements.lock`](build-requirements.lock). Setup fails closed if the Python build or complete installed package set differs from the reviewed locks.
 
 ## Install
 
@@ -41,7 +41,7 @@ omarchy pkg add uv ffmpeg zenity
 omarchy plugin add https://github.com/dlpwaters/omarchy-stem-splitter.git --enable
 ```
 
-Click the music-stem icon and choose **Set up engine**. The setup is user-local and requires network access once to download Python packages. The first run of each separation model also downloads that model into `~/.local/share/omarchy-stem-splitter/models`.
+Click the music-stem icon and choose **Set up engine**. The setup is user-local and requires network access once to download hash-locked Python wheels. The first run of each separation model downloads its reviewed bundle into `~/.local/share/omarchy-stem-splitter/models`. [`models.lock.json`](models.lock.json) fixes the URL, byte size, and SHA-256 of every model, configuration, metadata file, and Demucs weight; no component is handed to Audio Separator until all checks pass.
 
 ## Use
 
@@ -101,7 +101,7 @@ Full separation produces:
 
 ## Privacy, network, and permissions
 
-Audio processing is entirely local. The plugin never uploads track contents or reads credentials. Network access occurs only when `uv` installs the pinned open-source engine and when Audio Separator downloads a selected model for the first time.
+Audio processing is entirely local. The plugin never uploads track contents or reads credentials. Network access occurs only when `uv` installs the reviewed hash-locked engine and when the plugin downloads a selected model bundle for the first time. The plugin performs model downloads itself, writes through a temporary file, enforces the reviewed byte size while streaming, verifies SHA-256, and atomically publishes the result before Audio Separator starts. A changed or corrupted upstream artifact is rejected.
 
 Each separation runs in a collectable transient `systemd --user` unit named `omarchy-stem-splitter-job.service`. It exists only for the duration of a job, owns the complete worker process group, and allows safe cancellation even after the panel or shell closes.
 
@@ -112,7 +112,7 @@ Omarchy plugins run unsandboxed with the current user's permissions. This plugin
 - `~/.local/state/omarchy-stem-splitter` — job status, lock, and last engine error
 - `~/Desktop/stems` — finished user output
 
-The source models may have licenses or usage conditions separate from this plugin. Audio Separator downloads them from its configured upstream sources; this repository does not redistribute model weights.
+The source models may have licenses or usage conditions separate from this plugin. Their reviewed upstream locations and hashes are recorded in `models.lock.json`; this repository does not redistribute model weights.
 
 ## Update
 

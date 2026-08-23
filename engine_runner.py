@@ -44,7 +44,7 @@ def main() -> int:
         },
         mdxc_params={"segment_size": 256, "override_model_segment_size": False, "batch_size": 1, "overlap": 8, "pitch_shift": 0},
     )
-    emit(28, "Loading the model; first use downloads it once…")
+    emit(28, "Loading the verified model bundle…")
     separator.load_model(model_filename=args.model)
     emit(42, "Separating the track locally…")
     outputs = separator.separate(args.input)

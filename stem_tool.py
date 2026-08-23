@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -14,19 +15,22 @@ import subprocess
 import sys
 import tempfile
 import threading
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
 
-PLUGIN_VERSION = "1.0.1"
+PLUGIN_VERSION = "1.1.0"
 ENGINE_VERSION = "0.44.5"
-PYTHON_VERSION = "3.12"
+PYTHON_VERSION = "3.12.13"
+PYTHON_BUILD = "20260325"
+PYTHON_EXECUTABLE_SHA256 = "d3a545002164f920c88f3ec49d47c3bfd21237d1d3eed7f95f6ce7d81ea2254b"
 PYTORCH_VERSION = "2.13.0+cpu"
 TORCHVISION_VERSION = "0.28.0+cpu"
 AUDIOREAD_VERSION = "3.1.0"
 LIBROSA_VERSION = "0.10.2.post1"
-PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 VOCAL_MODEL = "model_bs_roformer_ep_317_sdr_12.9755.ckpt"
 FOUR_STEM_MODEL = "htdemucs_ft.yaml"
 FAST_VOCAL_MODEL = "UVR-MDX-NET-Inst_HQ_3.onnx"
@@ -37,6 +41,11 @@ PROCESSING_PROFILES = ("best", "fast")
 SUPPORTED_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".oga", ".aac", ".wma", ".aiff", ".aif"}
 
 HOME = Path.home()
+PLUGIN_DIR = Path(__file__).resolve().parent
+REQUIREMENTS_LOCK = PLUGIN_DIR / "requirements.lock"
+BUILD_REQUIREMENTS_LOCK = PLUGIN_DIR / "build-requirements.lock"
+MODELS_LOCK = PLUGIN_DIR / "models.lock.json"
+PYTORCH_CPU_INDEX = "https://download.pytorch.org/whl/cpu"
 DATA_HOME = Path(os.environ.get("XDG_DATA_HOME", HOME / ".local/share")) / "omarchy-stem-splitter"
 CACHE_HOME = Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / "omarchy-stem-splitter"
 STATE_HOME = Path(os.environ.get("XDG_STATE_HOME", HOME / ".local/state")) / "omarchy-stem-splitter"
@@ -170,27 +179,80 @@ def validate_input(path_text: str) -> Path:
     return source
 
 
-def engine_ready() -> tuple[bool, str]:
-    if not ENGINE_PYTHON.is_file():
+def normalized_package_name(value: str) -> str:
+    return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def locked_requirements() -> dict[str, str]:
+    try:
+        lines = REQUIREMENTS_LOCK.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        raise StemSplitterError("The reviewed engine dependency lock is missing.") from exc
+    locked: dict[str, str] = {}
+    for line in lines:
+        match = re.match(r"^([A-Za-z0-9_.-]+)==([^\s\\]+)", line)
+        if match:
+            locked[normalized_package_name(match.group(1))] = match.group(2)
+    if not locked or normalized_package_name("audio-separator") not in locked:
+        raise StemSplitterError("The reviewed engine dependency lock is invalid.")
+    return locked
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def python_runtime_ready(base_prefix: Path) -> bool:
+    executable = base_prefix / "bin" / "python3.12"
+    build_file = base_prefix / "BUILD"
+    try:
+        return (
+            base_prefix.name == "cpython-3.12.13-linux-x86_64-gnu"
+            and build_file.read_text(encoding="utf-8").strip() == PYTHON_BUILD
+            and sha256_file(executable) == PYTHON_EXECUTABLE_SHA256
+        )
+    except OSError:
+        return False
+
+
+def engine_ready(engine_python: Path = ENGINE_PYTHON) -> tuple[bool, str]:
+    if not engine_python.is_file():
         return False, "Audio engine setup is required."
     check = subprocess.run(
         [
-            str(ENGINE_PYTHON),
+            str(engine_python),
             "-c",
-            "import importlib.metadata as m; from audio_separator.separator import Separator; "
-            "print('|'.join(m.version(name) for name in "
-            "('audio-separator', 'torch', 'torchvision', 'audioread', 'librosa')))",
+            "import importlib.metadata as m,json,platform,re,sys; "
+            "from audio_separator.separator import Separator; "
+            "norm=lambda s:re.sub(r'[-_.]+','-',s).lower(); "
+            "print(json.dumps({'python':platform.python_version(),'base':sys.base_prefix,"
+            "'packages':{norm(d.metadata['Name']):d.version for d in m.distributions()}}))",
         ],
         capture_output=True,
         text=True,
         timeout=30,
         check=False,
     )
-    version_set = check.stdout.strip()
-    expected = "|".join(
-        (ENGINE_VERSION, PYTORCH_VERSION, TORCHVISION_VERSION, AUDIOREAD_VERSION, LIBROSA_VERSION)
-    )
-    if check.returncode != 0 or version_set != expected:
+    try:
+        details = json.loads(check.stdout)
+        expected = locked_requirements()
+        actual = details.get("packages") if isinstance(details, dict) else None
+        base_prefix = Path(str(details.get("base") or ""))
+    except (json.JSONDecodeError, StemSplitterError, TypeError, ValueError):
+        details = {}
+        expected = {}
+        actual = None
+        base_prefix = Path()
+    if (
+        check.returncode != 0
+        or details.get("python") != PYTHON_VERSION
+        or actual != expected
+        or not python_runtime_ready(base_prefix)
+    ):
         return False, f"Audio engine {ENGINE_VERSION} setup is required."
     return True, f"Audio Separator {ENGINE_VERSION} is ready."
 
@@ -219,29 +281,133 @@ def setup_engine() -> int:
         require_command("ffmpeg")
         DATA_HOME.mkdir(parents=True, exist_ok=True)
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        staging = DATA_HOME / f".venv-setup-{uuid.uuid4().hex}"
+        previous = DATA_HOME / ".venv-previous"
         emit("EVENT", 8, f"Preparing Python {PYTHON_VERSION}…")
-        if not ENGINE_PYTHON.is_file():
-            run_checked([uv, "venv", "--python", PYTHON_VERSION, "--python-preference", "managed", str(VENV_DIR)])
-        emit("EVENT", 24, "Installing the CPU audio runtime…")
-        run_checked([
-            uv, "pip", "install", "--python", str(ENGINE_PYTHON),
-            "--default-index", PYTORCH_CPU_INDEX,
-            f"torch=={PYTORCH_VERSION}",
-            f"torchvision=={TORCHVISION_VERSION}",
-        ])
-        emit("EVENT", 42, f"Installing Audio Separator {ENGINE_VERSION}…")
-        run_checked([
-            uv, "pip", "install", "--python", str(ENGINE_PYTHON),
-            f"audio-separator[cpu]=={ENGINE_VERSION}",
-            f"audioread=={AUDIOREAD_VERSION}",
-            f"librosa=={LIBROSA_VERSION}",
-        ])
-        ready, message = engine_ready()
-        if not ready:
-            raise StemSplitterError(message)
-        emit("EVENT", 96, "Checking FFmpeg and the isolated environment…")
-        emit("READY", message)
-        return 0
+        try:
+            run_checked([
+                uv, "venv", "--python", PYTHON_VERSION,
+                "--managed-python", str(staging),
+            ])
+            staging_python = staging / "bin" / "python"
+            base_prefix = Path(subprocess.check_output(
+                [str(staging_python), "-c", "import sys; print(sys.base_prefix)"],
+                text=True, timeout=10,
+            ).strip())
+            if not python_runtime_ready(base_prefix):
+                raise StemSplitterError("The managed Python runtime does not match the reviewed build.")
+            emit("EVENT", 24, "Installing the hash-locked CPU audio runtime…")
+            run_checked([
+                uv, "pip", "sync", str(REQUIREMENTS_LOCK),
+                "--python", str(staging_python), "--require-hashes",
+                "--build-constraints", str(BUILD_REQUIREMENTS_LOCK),
+                "--extra-index-url", PYTORCH_CPU_INDEX,
+                "--only-binary", ":all:", "--no-binary", "diffq", "--strict",
+            ])
+            ready, message = engine_ready(staging_python)
+            if not ready:
+                raise StemSplitterError(message)
+            emit("EVENT", 92, "Activating the reviewed environment…")
+            if previous.exists():
+                shutil.rmtree(previous)
+            if VENV_DIR.exists():
+                os.replace(VENV_DIR, previous)
+            try:
+                os.replace(staging, VENV_DIR)
+            except Exception:
+                if previous.exists() and not VENV_DIR.exists():
+                    os.replace(previous, VENV_DIR)
+                raise
+            if previous.exists():
+                shutil.rmtree(previous)
+            emit("EVENT", 96, "Checking FFmpeg and the isolated environment…")
+            emit("READY", message)
+            return 0
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+
+
+def model_lock() -> dict[str, object]:
+    try:
+        value = json.loads(MODELS_LOCK.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise StemSplitterError("The reviewed model lock is missing or invalid.") from exc
+    if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+        raise StemSplitterError("The reviewed model lock is invalid.")
+    return value
+
+
+def locked_model_file_matches(path: Path, record: dict[str, object]) -> bool:
+    try:
+        expected_size = int(record["bytes"])
+        expected_hash = str(record["sha256"])
+        return path.is_file() and path.stat().st_size == expected_size and sha256_file(path) == expected_hash
+    except (KeyError, OSError, TypeError, ValueError):
+        return False
+
+
+def download_locked_model_file(name: str, record: dict[str, object]) -> None:
+    if Path(name).name != name or "/" in name or "\\" in name:
+        raise StemSplitterError("The reviewed model lock contains an unsafe filename.")
+    try:
+        url = str(record["url"])
+        expected_size = int(record["bytes"])
+        expected_hash = str(record["sha256"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StemSplitterError("The reviewed model lock contains an invalid record.") from exc
+    if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        raise StemSplitterError("The reviewed model lock contains invalid download evidence.")
+    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{name}.", suffix=".part", dir=MODEL_DIR)
+    temporary = Path(temporary_name)
+    try:
+        digest = hashlib.sha256()
+        total = 0
+        emit("EVENT", 14, "Downloading and verifying a locked model component…")
+        request = urllib.request.Request(url, headers={"User-Agent": "OmarchyStemSplitter/1.1"})
+        with urllib.request.urlopen(request, timeout=300) as response, os.fdopen(descriptor, "wb") as output:
+            descriptor = -1
+            for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                total += len(chunk)
+                if total > expected_size:
+                    raise StemSplitterError("A model download exceeded its reviewed size.")
+                digest.update(chunk)
+                output.write(chunk)
+            output.flush()
+            os.fsync(output.fileno())
+        if total != expected_size or digest.hexdigest() != expected_hash:
+            raise StemSplitterError("A model download did not match its reviewed SHA-256.")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, MODEL_DIR / name)
+    except urllib.error.URLError as exc:
+        raise StemSplitterError("Could not download a reviewed model component.") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def ensure_model_bundle(model: str) -> None:
+    lock = model_lock()
+    files = lock.get("files")
+    models = lock.get("models")
+    if not isinstance(files, dict) or not isinstance(models, dict):
+        raise StemSplitterError("The reviewed model lock is invalid.")
+    names = models.get(model)
+    if not isinstance(names, list) or not names:
+        raise StemSplitterError("The requested model is not present in the reviewed lock.")
+    for raw_name in names:
+        name = str(raw_name)
+        record = files.get(name)
+        if not isinstance(record, dict):
+            raise StemSplitterError("The reviewed model lock is incomplete.")
+        target = MODEL_DIR / name
+        if locked_model_file_matches(target, record):
+            continue
+        download_locked_model_file(name, record)
+        if not locked_model_file_matches(target, record):
+            raise StemSplitterError("A model component failed its reviewed SHA-256 check.")
 
 
 def mapped_engine_progress(raw_percent: int, phase: str) -> int:
@@ -258,6 +424,8 @@ def call_engine(
     single_stem: str | None,
     profile: str,
 ) -> list[Path]:
+    emit("EVENT", 12, "Verifying the reviewed model bundle…")
+    ensure_model_bundle(model)
     runner = Path(__file__).with_name("engine_runner.py")
     command = [
         str(ENGINE_PYTHON), str(runner), "--input", str(source), "--model", model,

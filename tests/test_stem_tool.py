@@ -108,6 +108,57 @@ class StemToolTests(unittest.TestCase):
                 stem_tool.job_status()
                 self.assertEqual(stem_tool.load_job_state()["status"], "working")
 
+    def test_dependency_lock_covers_the_complete_engine(self):
+        locked = stem_tool.locked_requirements()
+        for name, version in {
+            "audio-separator": stem_tool.ENGINE_VERSION,
+            "torch": stem_tool.PYTORCH_VERSION,
+            "torchvision": stem_tool.TORCHVISION_VERSION,
+            "audioread": stem_tool.AUDIOREAD_VERSION,
+            "librosa": stem_tool.LIBROSA_VERSION,
+        }.items():
+            self.assertEqual(locked[name], version)
+        lock_text = stem_tool.REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+        self.assertIn("--hash=sha256:", lock_text)
+
+    def test_source_build_toolchain_is_pinned_and_hashed(self):
+        lock_text = stem_tool.BUILD_REQUIREMENTS_LOCK.read_text(encoding="utf-8")
+        for dependency in ("cython", "setuptools", "wheel"):
+            self.assertTrue(any(
+                line.startswith(f"{dependency}==") and line.endswith(" \\")
+                for line in lock_text.splitlines()
+            ))
+        self.assertIn("--hash=sha256:", lock_text)
+
+    def test_model_lock_covers_every_selectable_model_and_hash(self):
+        lock = stem_tool.model_lock()
+        files = lock["files"]
+        models = lock["models"]
+        for model in (
+            stem_tool.VOCAL_MODEL,
+            stem_tool.FOUR_STEM_MODEL,
+            stem_tool.FAST_VOCAL_MODEL,
+            stem_tool.FAST_FOUR_STEM_MODEL,
+        ):
+            self.assertIn(model, models)
+            for filename in models[model]:
+                self.assertIn(filename, files)
+                self.assertRegex(files[filename]["sha256"], r"^[0-9a-f]{64}$")
+                self.assertGreater(files[filename]["bytes"], 0)
+                self.assertTrue(files[filename]["url"].startswith("https://"))
+
+    def test_locked_model_file_match_rejects_wrong_size_and_hash(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "model.bin"
+            path.write_bytes(b"reviewed")
+            record = {
+                "bytes": len(b"reviewed"),
+                "sha256": "e4f934f321eb76c9bf8b5103e0a0d9afe72d6e62ace3d3ea849790619bf7487a",
+            }
+            self.assertTrue(stem_tool.locked_model_file_matches(path, record))
+            record["bytes"] += 1
+            self.assertFalse(stem_tool.locked_model_file_matches(path, record))
+
 
 if __name__ == "__main__":
     unittest.main()

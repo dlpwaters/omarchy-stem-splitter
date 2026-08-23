@@ -671,7 +671,7 @@ Panel {
           width: parent.width
           text: root.busy
             ? "Runs in the background · Safe to close this panel · Output appears when complete."
-            : "Output: ~/Desktop/stems/<track>/ · First use downloads the selected model."
+            : "Output: ~/Desktop/stems/<track>/ · First use downloads and verifies the locked model."
           color: root.muted
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

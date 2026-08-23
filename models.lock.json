@@ -1,0 +1,96 @@
+{
+  "schemaVersion": 1,
+  "files": {
+    "download_checks.json": {
+      "url": "https://raw.githubusercontent.com/TRvlvr/application_data/main/filelists/download_checks.json",
+      "bytes": 28267,
+      "sha256": "d3622e1fa19c161d3cf704927711b453d593a3f1eb0f2e0838c3136907935151"
+    },
+    "mdx_model_data.json": {
+      "url": "https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/model_data_new.json",
+      "bytes": 15358,
+      "sha256": "1aca8f9bcc57233bc714029663a9ec2345d9c7721f91e5e08f46392a879c6a9a"
+    },
+    "vr_model_data.json": {
+      "url": "https://raw.githubusercontent.com/TRvlvr/application_data/main/vr_model_data/model_data_new.json",
+      "bytes": 4380,
+      "sha256": "6a2021b9aa355c10f845b68c73944d47bd9e1fdf37b8a584b14ce8f88b09bb2f"
+    },
+    "model_bs_roformer_ep_317_sdr_12.9755.ckpt": {
+      "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+      "bytes": 639331213,
+      "sha256": "5b84f37e8d444c8cb30c79d77f613a41c05868ff9c9ac6c7049c00aefae115aa"
+    },
+    "model_bs_roformer_ep_317_sdr_12.9755.yaml": {
+      "url": "https://raw.githubusercontent.com/TRvlvr/application_data/main/mdx_model_data/mdx_c_configs/model_bs_roformer_ep_317_sdr_12.9755.yaml",
+      "bytes": 2273,
+      "sha256": "2bfdd16c656bd9519aba757cc4f8834b7ede675eb1e00ec4772d74ae1c41af7f"
+    },
+    "UVR-MDX-NET-Inst_HQ_3.onnx": {
+      "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/UVR-MDX-NET-Inst_HQ_3.onnx",
+      "bytes": 66759214,
+      "sha256": "317554b07fe1ea5279a77f2b1520a41ea4b93432560c4ffd08792c30fddf9adc"
+    },
+    "htdemucs_ft.yaml": {
+      "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/htdemucs_ft.yaml",
+      "bytes": 149,
+      "sha256": "69470b8c1bbd674437b51bc9fb491327a10ab0396b702c93389b9cf750016346"
+    },
+    "f7e0c4bc-ba3fe64a.th": {
+      "url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/f7e0c4bc-ba3fe64a.th",
+      "bytes": 84141271,
+      "sha256": "ba3fe64ae8ef66ac9a4857222ce48efbdc5eb3ad375cb79dd13debee5aaa4066"
+    },
+    "d12395a8-e57c48e6.th": {
+      "url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/d12395a8-e57c48e6.th",
+      "bytes": 84141271,
+      "sha256": "e57c48e6b0e38af4f7118d7bd08c49f0a0c0edf7d09143bdd902ea0d237303e6"
+    },
+    "92cfc3b6-ef3bcb9c.th": {
+      "url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/92cfc3b6-ef3bcb9c.th",
+      "bytes": 84141271,
+      "sha256": "ef3bcb9c8b40d14ae5d51b6db2587339cc12c6b77c0be151ce6d69002e087bf2"
+    },
+    "04573f0d-f3cf25b2.th": {
+      "url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/04573f0d-f3cf25b2.th",
+      "bytes": 84141271,
+      "sha256": "f3cf25b222c4eed7cd49dd8b2c9597d50c18bd154090f7b919cfa5f93cf22c49"
+    },
+    "htdemucs.yaml": {
+      "url": "https://github.com/TRvlvr/model_repo/releases/download/all_public_uvr_models/htdemucs.yaml",
+      "bytes": 21,
+      "sha256": "239c445d0b14454d541ad8bd9bb271c9e536d267e8a4625208744cbb2e7bb66c"
+    },
+    "955717e8-8726e21a.th": {
+      "url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th",
+      "bytes": 84141911,
+      "sha256": "8726e21a993978c7ba086d3872e7608d7d5bfca646ca4aca459ffda844faa8b4"
+    }
+  },
+  "models": {
+    "model_bs_roformer_ep_317_sdr_12.9755.ckpt": [
+      "download_checks.json",
+      "model_bs_roformer_ep_317_sdr_12.9755.ckpt",
+      "model_bs_roformer_ep_317_sdr_12.9755.yaml"
+    ],
+    "UVR-MDX-NET-Inst_HQ_3.onnx": [
+      "download_checks.json",
+      "mdx_model_data.json",
+      "vr_model_data.json",
+      "UVR-MDX-NET-Inst_HQ_3.onnx"
+    ],
+    "htdemucs_ft.yaml": [
+      "download_checks.json",
+      "htdemucs_ft.yaml",
+      "f7e0c4bc-ba3fe64a.th",
+      "d12395a8-e57c48e6.th",
+      "92cfc3b6-ef3bcb9c.th",
+      "04573f0d-f3cf25b2.th"
+    ],
+    "htdemucs.yaml": [
+      "download_checks.json",
+      "htdemucs.yaml",
+      "955717e8-8726e21a.th"
+    ]
+  }
+}
